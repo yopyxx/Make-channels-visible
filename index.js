@@ -49,14 +49,23 @@ async function registerCommands() {
   }
 }
 
+function parseRoleIds(input) {
+  return input.split(',').map(v => v.trim()).filter(Boolean);
+}
+
 function isPrivateChannel(channel, everyoneRoleId) {
-  const overwrite = channel.permissionOverwrites.cache.get(everyoneRoleId);
+  const overwrite = channel.permissionOverwrites?.cache?.get(everyoneRoleId);
   if (!overwrite) return false;
   return overwrite.deny.has(PermissionFlagsBits.ViewChannel);
 }
 
-function parseRoleIds(input) {
-  return input.split(',').map(v => v.trim()).filter(Boolean);
+function isTextLikeChannel(channel) {
+  return [
+    ChannelType.GuildText,
+    ChannelType.GuildAnnouncement,
+    ChannelType.GuildForum,
+    ChannelType.GuildMedia
+  ].includes(channel.type);
 }
 
 client.once('ready', () => {
@@ -94,10 +103,12 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (!validRoles.length) {
-      return interaction.editReply(`유효한 역할이 없습니다.\n잘못된 역할 ID: ${invalidRoleIds.join(', ')}`);
+      return interaction.editReply(
+        `유효한 역할이 없습니다.\n잘못된 역할 ID: ${invalidRoleIds.join(', ')}`
+      );
     }
 
-    const allChannels = guild.channels.cache.filter(ch =>
+    const channels = guild.channels.cache.filter(ch =>
       [
         ChannelType.GuildCategory,
         ChannelType.GuildText,
@@ -105,35 +116,80 @@ client.on('interactionCreate', async interaction => {
         ChannelType.GuildVoice,
         ChannelType.GuildStageVoice,
         ChannelType.GuildForum,
+        ChannelType.GuildMedia
       ].includes(ch.type)
     );
 
-    const privateChannels = allChannels.filter(ch => isPrivateChannel(ch, everyoneRoleId));
+    const privateChannels = channels.filter(ch => isPrivateChannel(ch, everyoneRoleId));
 
-    let updatedCount = 0;
-    const failedChannels = [];
+    if (!privateChannels.size) {
+      return interaction.editReply('비공개 카테고리/채널을 찾지 못했습니다.');
+    }
+
+    let successCount = 0;
+    const failed = [];
 
     for (const channel of privateChannels.values()) {
       try {
         for (const role of validRoles) {
-          await channel.permissionOverwrites.edit(role.id, {
-            ViewChannel: true,
-            ReadMessageHistory: true
-          });
+          const perms = {
+            ViewChannel: true
+          };
+
+          if (isTextLikeChannel(channel)) {
+            perms.ReadMessageHistory = true;
+          }
+
+          await channel.permissionOverwrites.edit(role.id, perms);
         }
-        updatedCount++;
-      } catch (e) {
-        failedChannels.push(`${channel.name} (${channel.id})`);
+        successCount++;
+      } catch (err) {
+        console.error(`권한 수정 실패: ${channel.name} (${channel.id})`, err);
+        failed.push(`${channel.name} (${channel.id})`);
       }
     }
 
-    let msg = `완료되었습니다.\n처리된 비공개 채널/카테고리: ${updatedCount}개`;
+    // 카테고리 아래 채널까지 한 번 더 직접 적용
+    const categories = guild.channels.cache.filter(ch => ch.type === ChannelType.GuildCategory);
+
+    for (const category of categories.values()) {
+      if (!isPrivateChannel(category, everyoneRoleId)) continue;
+
+      const children = guild.channels.cache.filter(ch => ch.parentId === category.id);
+
+      for (const child of children.values()) {
+        try {
+          for (const role of validRoles) {
+            const perms = {
+              ViewChannel: true
+            };
+
+            if (isTextLikeChannel(child)) {
+              perms.ReadMessageHistory = true;
+            }
+
+            await child.permissionOverwrites.edit(role.id, perms);
+          }
+        } catch (err) {
+          console.error(`하위 채널 권한 수정 실패: ${child.name} (${child.id})`, err);
+          if (!failed.includes(`${child.name} (${child.id})`)) {
+            failed.push(`${child.name} (${child.id})`);
+          }
+        }
+      }
+    }
+
+    let msg = `완료되었습니다.\n처리된 비공개 채널/카테고리 수: ${successCount}개`;
+
     if (invalidRoleIds.length) {
       msg += `\n잘못된 역할 ID: ${invalidRoleIds.join(', ')}`;
     }
-    if (failedChannels.length) {
-      msg += `\n처리 실패:\n${failedChannels.join('\n')}`;
+
+    if (failed.length) {
+      msg += `\n처리 실패 채널:\n${failed.join('\n')}`;
     }
+
+    msg += `\n\n주의: 이미 개별 채널 권한이 따로 꼬여 있는 경우에는 디스코드에서 채널 권한 동기화를 직접 해줘야 할 수 있습니다.`;
 
     await interaction.editReply(msg);
   } catch (err) {
