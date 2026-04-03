@@ -23,7 +23,7 @@ const client = new Client({
 const commands = [
   new SlashCommandBuilder()
     .setName('추가')
-    .setDescription('입력한 역할이 모든 비공개 카테고리/채널을 볼 수 있게 설정합니다.')
+    .setDescription('입력한 역할이 서버의 모든 카테고리/채널을 볼 수 있게 설정합니다.')
     .addStringOption(option =>
       option
         .setName('역할id')
@@ -50,19 +50,35 @@ async function registerCommands() {
 }
 
 function parseRoleIds(input) {
-  return input.split(',').map(v => v.trim()).filter(Boolean);
-}
-
-function isPrivateChannel(channel, everyoneRoleId) {
-  const overwrite = channel.permissionOverwrites?.cache?.get(everyoneRoleId);
-  if (!overwrite) return false;
-  return overwrite.deny.has(PermissionFlagsBits.ViewChannel);
+  return input
+    .split(',')
+    .map(v => v.trim())
+    .filter(Boolean);
 }
 
 function isTextLikeChannel(channel) {
   return [
     ChannelType.GuildText,
     ChannelType.GuildAnnouncement,
+    ChannelType.GuildForum,
+    ChannelType.GuildMedia
+  ].includes(channel.type);
+}
+
+function isVoiceLikeChannel(channel) {
+  return [
+    ChannelType.GuildVoice,
+    ChannelType.GuildStageVoice
+  ].includes(channel.type);
+}
+
+function isSupportedChannel(channel) {
+  return [
+    ChannelType.GuildCategory,
+    ChannelType.GuildText,
+    ChannelType.GuildAnnouncement,
+    ChannelType.GuildVoice,
+    ChannelType.GuildStageVoice,
     ChannelType.GuildForum,
     ChannelType.GuildMedia
   ].includes(channel.type);
@@ -91,15 +107,16 @@ client.on('interactionCreate', async interaction => {
       return interaction.editReply('역할 ID를 올바르게 입력해주세요.');
     }
 
-    const everyoneRoleId = guild.roles.everyone.id;
-
     const validRoles = [];
     const invalidRoleIds = [];
 
     for (const roleId of roleIds) {
       const role = await guild.roles.fetch(roleId).catch(() => null);
-      if (!role) invalidRoleIds.push(roleId);
-      else validRoles.push(role);
+      if (!role) {
+        invalidRoleIds.push(roleId);
+      } else {
+        validRoles.push(role);
+      }
     }
 
     if (!validRoles.length) {
@@ -108,28 +125,16 @@ client.on('interactionCreate', async interaction => {
       );
     }
 
-    const channels = guild.channels.cache.filter(ch =>
-      [
-        ChannelType.GuildCategory,
-        ChannelType.GuildText,
-        ChannelType.GuildAnnouncement,
-        ChannelType.GuildVoice,
-        ChannelType.GuildStageVoice,
-        ChannelType.GuildForum,
-        ChannelType.GuildMedia
-      ].includes(ch.type)
-    );
+    const channels = guild.channels.cache.filter(isSupportedChannel);
 
-    const privateChannels = channels.filter(ch => isPrivateChannel(ch, everyoneRoleId));
-
-    if (!privateChannels.size) {
-      return interaction.editReply('비공개 카테고리/채널을 찾지 못했습니다.');
+    if (!channels.size) {
+      return interaction.editReply('처리할 카테고리/채널이 없습니다.');
     }
 
     let successCount = 0;
     const failed = [];
 
-    for (const channel of privateChannels.values()) {
+    for (const channel of channels.values()) {
       try {
         for (const role of validRoles) {
           const perms = {
@@ -138,10 +143,17 @@ client.on('interactionCreate', async interaction => {
 
           if (isTextLikeChannel(channel)) {
             perms.ReadMessageHistory = true;
+            perms.SendMessages = true;
+          }
+
+          if (isVoiceLikeChannel(channel)) {
+            perms.Connect = true;
+            perms.Speak = true;
           }
 
           await channel.permissionOverwrites.edit(role.id, perms);
         }
+
         successCount++;
       } catch (err) {
         console.error(`권한 수정 실패: ${channel.name} (${channel.id})`, err);
@@ -149,37 +161,7 @@ client.on('interactionCreate', async interaction => {
       }
     }
 
-    // 카테고리 아래 채널까지 한 번 더 직접 적용
-    const categories = guild.channels.cache.filter(ch => ch.type === ChannelType.GuildCategory);
-
-    for (const category of categories.values()) {
-      if (!isPrivateChannel(category, everyoneRoleId)) continue;
-
-      const children = guild.channels.cache.filter(ch => ch.parentId === category.id);
-
-      for (const child of children.values()) {
-        try {
-          for (const role of validRoles) {
-            const perms = {
-              ViewChannel: true
-            };
-
-            if (isTextLikeChannel(child)) {
-              perms.ReadMessageHistory = true;
-            }
-
-            await child.permissionOverwrites.edit(role.id, perms);
-          }
-        } catch (err) {
-          console.error(`하위 채널 권한 수정 실패: ${child.name} (${child.id})`, err);
-          if (!failed.includes(`${child.name} (${child.id})`)) {
-            failed.push(`${child.name} (${child.id})`);
-          }
-        }
-      }
-    }
-
-    let msg = `완료되었습니다.\n처리된 비공개 채널/카테고리 수: ${successCount}개`;
+    let msg = `완료되었습니다.\n처리된 전체 카테고리/채널 수: ${successCount}개`;
 
     if (invalidRoleIds.length) {
       msg += `\n잘못된 역할 ID: ${invalidRoleIds.join(', ')}`;
@@ -189,7 +171,15 @@ client.on('interactionCreate', async interaction => {
       msg += `\n처리 실패 채널:\n${failed.join('\n')}`;
     }
 
-    msg += `\n\n주의: 이미 개별 채널 권한이 따로 꼬여 있는 경우에는 디스코드에서 채널 권한 동기화를 직접 해줘야 할 수 있습니다.`;
+    msg += `\n\n적용 내용:
+- 모든 카테고리/채널에 대해 지정 역할의 보기 권한 허용
+- 텍스트형 채널은 메시지 기록 보기/메시지 보내기 허용
+- 음성형 채널은 입장/발언 허용
+
+주의:
+- 관리자 권한보다 위에 있는 역할 구조 문제나
+- 봇 역할이 대상 채널 권한보다 아래에 있는 경우
+일부 채널은 적용 실패할 수 있습니다.`;
 
     await interaction.editReply(msg);
   } catch (err) {
