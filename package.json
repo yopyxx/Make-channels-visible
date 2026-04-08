@@ -1,14 +1,14 @@
 {
   "dependencies": {
-    "discord.js": "^14.26.2"
+    "discord.js": "^14.26.0"
   },
-  "name": "see2",
+  "name": "see",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
   "devDependencies": {},
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo "Error: no test specified" && exit 1"
   },
   "keywords": [],
   "author": "",
